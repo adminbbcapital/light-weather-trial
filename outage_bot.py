@@ -102,9 +102,9 @@ def notify(texts, chats):
         if os.getenv("DRY_RUN") or not token:
             print(text, "\n" + "-" * 40)
             continue
-        for chat in chats:
+        for n, chat in enumerate(chats, 1):
             send_telegram(token, chat, text)
-            print("Надіслано в чат", chat)
+            print(f"Надіслано отримувачу {n} з {len(chats)}")  # id не друкуємо: логи публічні
 
 
 # ---------- розбір даних ----------

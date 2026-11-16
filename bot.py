@@ -422,9 +422,9 @@ def main():
 
     token = os.environ["TG_TOKEN"]
     chats = [c.strip() for c in os.environ["TG_CHAT_ID"].split(",") if c.strip()]
-    for chat in chats:
+    for n, chat in enumerate(chats, 1):
         send_telegram(token, chat, msg)
-        print("Надіслано в чат", chat)
+        print(f"Надіслано отримувачу {n} з {len(chats)}")  # id не друкуємо: логи публічні
     if not os.getenv("FORCE"):
         with open(SENT_FILE, "w", encoding="utf-8") as f:
             f.write(now.strftime("%Y-%m-%d") + "\n")
