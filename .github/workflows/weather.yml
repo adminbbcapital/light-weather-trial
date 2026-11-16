@@ -1,0 +1,46 @@
+name: Ранкове зведення
+
+# Основне надсилання робить безперервний цикл у outage.yml (о 07:00 за Києвом).
+# Ці запуски за розкладом лише підстраховують, якщо цикл не працює.
+# Дубля не буде: bot.py надсилає один раз на день (дата у weather_sent.txt).
+# Run workflow вручну надсилає зведення одразу.
+
+on:
+  schedule:
+    - cron: "20 4 * * *"
+    - cron: "20 5 * * *"
+    - cron: "20 6 * * *"
+    - cron: "20 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # зберегти weather_sent.txt
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Надіслати зведення
+        run: python bot.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PARENT_GPV: ${{ vars.PARENT_GPV }}
+          PARENT_GAV: ${{ vars.PARENT_GAV }}
+          PARENT_SGAV: ${{ vars.PARENT_SGAV }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+      - name: Зберегти дату надсилання
+        if: github.event_name == 'schedule'
+        run: |
+          [ -f weather_sent.txt ] || exit 0
+          git config user.name "weather-bot"
+          git config user.email "weather-bot@users.noreply.github.com"
+          git add weather_sent.txt
+          if ! git diff --cached --quiet; then
+            git commit -qm "Зведення надіслано"
+            git pull -q --rebase -X theirs && git push -q || true
+          fi

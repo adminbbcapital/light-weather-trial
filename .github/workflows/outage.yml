@@ -1,0 +1,95 @@
+name: Відключення світла
+
+# Бот працює безперервно: один запуск крутиться ~5 год 40 хв і кожні 2 хвилини
+# перевіряє графік світла та чи не час надсилати ранкове зведення погоди.
+# Наприкінці запуск сам запускає наступний. Розклад раз на годину лише підстраховує,
+# якщо ланцюжок обірветься (GitHub часто пропускає запуски за розкладом).
+# Потрібен ПУБЛІЧНИЙ репозиторій: у приватному безкоштовних хвилин не вистачить.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      status:
+        description: "Надіслати поточний стан графіка (для перевірки)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # зберігати state.json і weather_sent.txt
+  actions: write  # запускати наступний цикл
+
+jobs:
+  # Ручна перевірка: одна перевірка з надсиланням поточного стану, не чекає на цикл.
+  check-now:
+    if: github.event_name == 'workflow_dispatch' && inputs.status
+    runs-on: ubuntu-latest
+    concurrency:
+      group: outage-manual
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Перевірити відключення
+        run: python outage_bot.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          PARENT_GPV: ${{ vars.PARENT_GPV }}
+          PARENT_GAV: ${{ vars.PARENT_GAV }}
+          PARENT_SGAV: ${{ vars.PARENT_SGAV }}
+          SEND_STATUS: "1"
+      - name: Зберегти стан
+        if: always()
+        run: |
+          git config user.name "outage-bot"
+          git config user.email "outage-bot@users.noreply.github.com"
+          git add state.json
+          if ! git diff --cached --quiet; then
+            git commit -qm "Оновлено стан відключень"
+            git pull -q --rebase -X theirs && git push -q || true
+          fi
+
+  # Безперервний цикл. Одночасно працює лише один (решта чекають у черзі).
+  loop:
+    if: github.event_name == 'schedule' || !inputs.status
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    concurrency:
+      group: outage-loop
+      cancel-in-progress: false
+    env:
+      TG_TOKEN: ${{ secrets.TG_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+      PARENT_GPV: ${{ vars.PARENT_GPV }}
+      PARENT_GAV: ${{ vars.PARENT_GAV }}
+      PARENT_SGAV: ${{ vars.PARENT_SGAV }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Цикл перевірок
+        run: |
+          git config user.name "outage-bot"
+          git config user.email "outage-bot@users.noreply.github.com"
+          end=$((SECONDS + 20400))   # 5 год 40 хв
+          while [ $SECONDS -lt $end ]; do
+            git pull -q --rebase -X theirs || git rebase --abort || true
+            python outage_bot.py || echo "outage_bot: помилка"
+            python bot.py || echo "bot.py: помилка"
+            for f in state.json weather_sent.txt; do [ -f "$f" ] && git add "$f"; done
+            if ! git diff --cached --quiet; then
+              git commit -qm "Оновлено стан відключень"
+              git pull -q --rebase -X theirs && git push -q || echo "push не вдався, спробую пізніше"
+            fi
+            sleep 120
+          done
+      - name: Запустити наступний цикл
+        if: success() || failure() # не перезапускати, якщо цикл зупинили вручну (Cancel)
+        run: gh workflow run outage.yml --ref "${{ github.ref_name }}" -f status=false
