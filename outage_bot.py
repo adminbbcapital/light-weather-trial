@@ -4,6 +4,7 @@
 Бере дані з відкритого API сайту off.energy.mk.ua і пише в Telegram, коли:
   * опубліковано або змінено графік для вашої черги;
   * для черги вмикається або завершується відключення (стан на сайті).
+  * за 15 хв до відключення за графіком і коли за графіком воно закінчилось.
 
 Лише стандартна бібліотека Python 3.9+.
 
@@ -47,6 +48,7 @@ LABELS = {
     "PROBABLY_OFF": ("🟡", "Можливе відключення"),
 }
 OFF_TYPES = ("OFF", "SURE_OFF")
+REMIND_BEFORE = 15  # за скільки хвилин до відключення за графіком попереджати
 
 WEEKDAYS = ["понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя"]
 MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня",
@@ -262,6 +264,7 @@ def process(data, state, now):
     msgs = []
 
     first = not state or "days" not in state
+    reminders = [k for k in (state or {}).get("reminders", []) if k.startswith(today)]
     if first:
         msgs.append(status_message(
             watched, days, today,
@@ -287,6 +290,7 @@ def process(data, state, now):
                 msgs.append(head + "\n" + day_block(date, label, new) + prev)
         # 2) увімкнення / завершення відключення
         old_enabled = state.get("enabled", {})
+        just_on = set()
         for w in watched:
             label, was, now_on = w["label"], old_enabled.get(w["label"]), w["enabled"]
             if was is None or was == now_on:
@@ -294,16 +298,62 @@ def process(data, state, now):
             if now_on:
                 icon = "🚨" if w["group"] != "ГПВ" else "🔴"
                 text = f"{icon} <b>Увімкнено відключення</b> · черга {label}"
-                end = current_end(days.get(today, {}).get(label, []), now)
+                ints = days.get(today, {}).get(label, [])
+                end = current_end(ints, now)
+                nm = now.hour * 60 + now.minute
+                nxt = next(((s, e) for s, e in off_blocks(ints) if s > nm), None)
                 if end:
                     text += f"\n⏳ Орієнтовно до {fmt_time(end)}"
+                elif nxt:
+                    text += f"\n⏳ Найближче за графіком: {fmt_time(nxt[0])}–{fmt_time(nxt[1])}"
+                    if nxt[0] - nm <= 60:  # про нього вже сказали, окреме «⏰» не потрібне
+                        reminders.append(f"{today} {label} {nxt[0]}-{nxt[1]} start")
                 msgs.append(text)
+                just_on.add(label)
             else:
                 msgs.append(f"🟢 <b>Відключення завершено</b> · черга {label}\n"
                             "Світло має з’явитися найближчим часом.")
 
-    new_state = {"init": True, "days": days, "enabled": enabled}
+    # 3) нагадування за графіком: перед відключенням і коли світло має повернутися.
+    # Прапорець «відключення активне» на сайті не скидається після кожного блоку,
+    # тому про повернення світла судимо за годинами графіка.
+    if not first:
+        msgs += schedule_reminders(watched, days.get(today, {}), today, now,
+                                   reminders, just_on)
+    new_state = {"init": True, "days": days, "enabled": enabled, "reminders": reminders}
     return msgs, new_state
+
+
+def schedule_reminders(watched, today_days, today, now, sent, just_on=()):
+    """Повідомлення «за 15 хв відключення» і «відключення за графіком закінчилось».
+    Лише для черг ГПВ, для яких на сайті зараз діє відключення. Ключі надісланих
+    нагадувань додаються в sent, щоб не повторювати."""
+    nm = now.hour * 60 + now.minute
+    out = []
+    for w in watched:
+        if w["group"] != "ГПВ" or not w["enabled"]:
+            continue
+        label = w["label"]
+        ints = today_days.get(label, [])
+        for s, e in off_blocks(ints):
+            key = f"{today} {label} {s}-{e}"
+            if (0 < s and s - REMIND_BEFORE <= nm < s and key + " start" not in sent):
+                sent.append(key + " start")
+                if label not in just_on:
+                    out.append(f"⏰ <b>О {fmt_time(s)} відключення світла</b> · черга {label}\n"
+                               f"За графіком до {fmt_time(e)}. Зарядіть телефон 🔋")
+            if e < 1440 and e <= nm < e + 30 and key + " end" not in sent:
+                sent.append(key + " end")
+                text = (f"🟢 <b>О {fmt_time(e)} відключення за графіком закінчилось</b> · черга {label}\n"
+                        "Світло має з’явитися найближчим часом.")
+                prob = next((pe for ps, pe, t in ints if ps == e and t == "PROBABLY_OFF"), None)
+                if prob:
+                    text += f"\n🟡 До {fmt_time(prob)} ще можливе відключення."
+                nxt = next(((ns, ne) for ns, ne in off_blocks(ints) if ns > e), None)
+                if nxt:
+                    text += f"\n📅 Наступне за графіком: {fmt_time(nxt[0])}–{fmt_time(nxt[1])}"
+                out.append(text)
+    return out
 
 
 # ---------- стан ----------
