@@ -83,12 +83,16 @@ jobs:
             git pull -q --rebase -X theirs || git rebase --abort || true
             python outage_bot.py || echo "outage_bot: помилка"
             python bot.py || echo "bot.py: помилка"
-            for f in state.json weather_sent.txt; do [ -f "$f" ] && git add "$f"; done
+            # нагадування про лічильники; замість паузи ~2 хв слухає натискання кнопки
+            t0=$SECONDS
+            python meters_bot.py --listen 110 || echo "meters_bot: помилка"
+            for f in state.json weather_sent.txt meters_state.json; do [ -f "$f" ] && git add "$f"; done
             if ! git diff --cached --quiet; then
               git commit -qm "Оновлено стан відключень"
               git pull -q --rebase -X theirs && git push -q || echo "push не вдався, спробую пізніше"
             fi
-            sleep 120
+            left=$((120 - (SECONDS - t0)))
+            if [ $left -gt 0 ]; then sleep $left; fi
           done
       - name: Запустити наступний цикл
         if: success() || failure() # не перезапускати, якщо цикл зупинили вручну (Cancel)
